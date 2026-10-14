@@ -4,22 +4,28 @@
 //   GET  ?a=admin    toàn bộ bài làm (cần mật khẩu quản trị)
 //   POST ?a=delete   xóa một bài làm (cần mật khẩu quản trị)
 import { createHash, timingSafeEqual } from 'node:crypto';
+import net from 'node:net';
+import tls from 'node:tls';
 import { TABLES } from '../lib/kana.js';
 
 const KEY = 'kana:results';
 const MAX_RECORDS = 30000;
 const MAX_QUESTIONS = 50;
 
-/* ---------- Upstash Redis qua REST (không cần cài thêm thư viện) ---------- */
-function creds() {
+/* ---------- Kho dữ liệu Redis (không cần cài thêm thư viện) ----------
+   Cách 1: Upstash qua REST  (KV_REST_API_URL + KV_REST_API_TOKEN)
+   Cách 2: Redis thông thường (KV_REDIS_URL hoặc REDIS_URL, dạng redis:// hoặc rediss://) */
+function restCreds() {
   return {
     url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
     token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
   };
 }
-async function redis(cmd) {
-  const { url, token } = creds();
-  if (!url || !token) throw Object.assign(new Error('no_db'), { code: 'no_db' });
+function tcpUrl() {
+  return process.env.KV_REDIS_URL || process.env.REDIS_URL;
+}
+
+async function viaRest(cmd, { url, token }) {
   const res = await fetch(url, {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
@@ -28,6 +34,124 @@ async function redis(cmd) {
   const body = await res.json().catch(() => ({}));
   if (!res.ok || body.error) throw new Error(body.error || 'redis_' + res.status);
   return body.result;
+}
+
+/* Bộ đọc giao thức RESP2. Trả về [giá trị, vị trí kế tiếp] hoặc null nếu dữ liệu chưa đủ. */
+function parseReply(buf, pos = 0) {
+  if (pos >= buf.length) return null;
+  const type = String.fromCharCode(buf[pos]);
+  const eol = buf.indexOf('\r\n', pos + 1);
+  if (eol < 0) return null;
+  const line = buf.toString('utf8', pos + 1, eol);
+  const next = eol + 2;
+  switch (type) {
+    case '+': return [line, next];
+    case '-': return [Object.assign(new Error(line), { redisReply: true }), next];
+    case ':': return [Number(line), next];
+    case '$': {
+      const n = Number(line);
+      if (n < 0) return [null, next];
+      if (buf.length < next + n + 2) return null;
+      return [buf.toString('utf8', next, next + n), next + n + 2];
+    }
+    case '*': {
+      const n = Number(line);
+      if (n < 0) return [null, next];
+      const arr = [];
+      let p = next;
+      for (let i = 0; i < n; i++) {
+        const r = parseReply(buf, p);
+        if (!r) return null;
+        arr.push(r[0]);
+        p = r[1];
+      }
+      return [arr, p];
+    }
+    default: throw new Error('Phản hồi Redis không hợp lệ');
+  }
+}
+function encodeCommand(cmd) {
+  const parts = ['*' + cmd.length + '\r\n'];
+  for (const arg of cmd) {
+    const s = String(arg);
+    parts.push('$' + Buffer.byteLength(s) + '\r\n' + s + '\r\n');
+  }
+  return Buffer.from(parts.join(''));
+}
+
+let tcp = null; // { socket, ready, queue, buf }
+function dropTcp(err) {
+  const c = tcp;
+  tcp = null;
+  if (!c) return;
+  try { c.socket.destroy(); } catch {}
+  for (const p of c.queue.splice(0)) { clearTimeout(p.timer); p.reject(err || new Error('Mất kết nối Redis')); }
+}
+function sendTcp(c, cmd) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => dropTcp(new Error('Redis phản hồi quá chậm')), 10000);
+    c.queue.push({ resolve, reject, timer });
+    c.socket.write(encodeCommand(cmd));
+  });
+}
+function openTcp(urlString) {
+  const u = new URL(urlString);
+  const secure = u.protocol === 'rediss:';
+  const port = Number(u.port) || 6379;
+  const c = { socket: null, ready: null, queue: [], buf: Buffer.alloc(0) };
+  c.ready = new Promise((resolve, reject) => {
+    const onConnect = () => {
+      const user = decodeURIComponent(u.username || '');
+      const pass = decodeURIComponent(u.password || '');
+      if (!pass) return resolve();
+      sendTcp(c, user ? ['AUTH', user, pass] : ['AUTH', pass]).then(() => resolve(), reject);
+    };
+    const socket = secure
+      ? tls.connect({ host: u.hostname, port, servername: u.hostname }, onConnect)
+      : net.connect({ host: u.hostname, port }, onConnect);
+    c.socket = socket;
+    socket.setTimeout(8000, () => { if (!c.connected) dropTcp(new Error('Kết nối Redis quá chậm')); });
+    socket.on('data', (chunk) => {
+      c.buf = Buffer.concat([c.buf, chunk]);
+      for (;;) {
+        let r;
+        try { r = parseReply(c.buf); } catch (e) { return dropTcp(e); }
+        if (!r) break;
+        c.buf = c.buf.subarray(r[1]);
+        const p = c.queue.shift();
+        if (!p) continue;
+        clearTimeout(p.timer);
+        if (r[0] instanceof Error) p.reject(r[0]); else p.resolve(r[0]);
+      }
+    });
+    socket.on('error', (e) => { dropTcp(e); reject(e); });
+    socket.on('close', () => { dropTcp(); reject(new Error('Kết nối Redis đã đóng')); });
+    socket.on('connect', () => { c.connected = true; socket.setTimeout(0); });
+  });
+  return c;
+}
+async function viaTcp(cmd, urlString) {
+  // Kết nối cũ có thể đã bị Redis đóng khi trang không hoạt động: thử nối lại một lần.
+  for (let attempt = 0; ; attempt++) {
+    if (!tcp) tcp = openTcp(urlString);
+    const c = tcp;
+    try {
+      await c.ready;
+      return await sendTcp(c, cmd);
+    } catch (e) {
+      if (tcp === c) dropTcp(e);
+      if (e && e.redisReply) throw e; // Redis trả lỗi lệnh thật sự, không thử lại
+      if (attempt >= 1) throw e;
+    }
+  }
+}
+
+async function redis(cmd) {
+  const rest = restCreds();
+  if (rest.url && rest.token) return viaRest(cmd, rest);
+  const url = tcpUrl();
+  if (url) return viaTcp(cmd, url);
+  throw Object.assign(new Error('no_db'), { code: 'no_db' });
 }
 
 /* ---------- tiện ích ---------- */
@@ -169,7 +293,7 @@ export default {
       return send({ error: 'not_found', message: 'Không tìm thấy.' }, 404);
     } catch (e) {
       if (e && e.code === 'no_db') {
-        return send({ error: 'no_db', message: 'Chưa kết nối kho dữ liệu (Upstash Redis) cho dự án.' }, 503);
+        return send({ error: 'no_db', message: 'Chưa kết nối kho dữ liệu Redis cho dự án.' }, 503);
       }
       console.error(e);
       return send({ error: 'server', message: 'Máy chủ gặp lỗi, hãy thử lại sau.' }, 500);
