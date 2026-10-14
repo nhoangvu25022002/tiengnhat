@@ -13,6 +13,22 @@
 body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font-ui);font-size:15px;line-height:1.55}
 .foot{max-width:880px;margin-inline:auto;padding-inline:16px;padding-block:0 32px;font-size:.8rem;color:var(--muted)}
 .foot a{color:var(--muted)}
+/* báo đúng xanh, sai đỏ */
+.opt.right{background:var(--ok-soft);border-color:var(--ok);color:var(--ok)}
+.opt.wrong{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
+.opt:disabled{cursor:default}
+.opt:disabled:not(.right):not(.wrong){opacity:.55}
+.opt .mk{position:absolute;right:10px;top:6px;font-family:var(--font-ui);font-size:.9rem;font-weight:700}
+.fbslot{width:100%;max-width:520px;min-height:46px;display:flex}
+.fb{width:100%;padding:10px 14px;border-radius:10px;text-align:center;font-size:.95rem}
+.fb.ok{background:var(--ok-soft);color:var(--ok)}
+.fb.bad{background:var(--bad-soft);color:var(--bad)}
+.dot.done.right{background:var(--ok-soft);border-color:var(--ok);color:var(--ok)}
+.dot.done.wrong{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
+/* đồng hồ làm bài */
+.qright{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.timer{display:inline-flex;align-items:baseline;gap:8px;padding:5px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);font-variant-numeric:tabular-nums}
+.timer b{font-size:1.05rem}
 </style>
 </head>
 <body>
@@ -113,6 +129,25 @@ function fmtTime(ts){
     return new Date(ts).toLocaleString('vi-VN', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
   } catch(e){ return ''; }
 }
+/* ---------- đồng hồ làm bài ---------- */
+var timerId = null;
+function fmtDur(s){
+  s = Math.max(0, Math.round(+s || 0));
+  var m = Math.floor(s / 60), r = s % 60;
+  return (m < 10 ? '0' : '') + m + ':' + (r < 10 ? '0' : '') + r;
+}
+function elapsed(){ return quiz ? Math.floor((Date.now() - quiz.startedAt) / 1000) : 0; }
+function stopTimer(){ if (timerId){ clearInterval(timerId); timerId = null; } }
+function startTimer(){
+  stopTimer();
+  timerId = setInterval(function(){
+    var el = $('#timer');
+    if (el && quiz && !quiz.submitting) el.textContent = fmtDur(elapsed());
+  }, 1000);
+}
+function answerOf(q){ return q.type === 'k2r' ? q.ro : q.ch; }
+function isRight(q){ return q.picked !== null && q.picked === answerOf(q); }
+
 function api(path, opts){
   return fetch(path, opts).then(function(r){
     return r.json().catch(function(){ return {}; }).then(function(d){
@@ -158,9 +193,11 @@ function buildQuiz(partKey){
 function startQuiz(partKey){
   if (!PARTS[partKey]) return;
   quiz = buildQuiz(partKey);
+  quiz.startedAt = Date.now();
   result = null;
   view = 'quiz';
   render();
+  startTimer();
 }
 function answeredCount(){
   return quiz.questions.filter(function(q){ return q.picked !== null; }).length;
@@ -174,14 +211,13 @@ function pick(idx){
   if (view !== 'quiz' || !quiz || quiz.submitting) return;
   var q = quiz.questions[quiz.i];
   if (idx < 0 || idx >= q.opts.length) return;
+  if (q.picked !== null) return;            // đã chọn thì không đổi được, để tránh dò đáp án
   q.picked = q.opts[idx];
   quiz.confirmEmpty = false;
   quiz.error = '';
-  main.querySelectorAll('.opt').forEach(function(b, j){
-    b.classList.toggle('sel', j === idx);
-    b.setAttribute('aria-pressed', j === idx ? 'true' : 'false');
-  });
-  updateQuizMeta();
+  renderQuiz();
+  var nb = main.querySelector('[data-act=next]:not([disabled]), #submit');
+  if (nb) nb.focus();
 }
 function exitQuiz(btn){
   if (quiz.exitArmed){ quiz = null; view = 'home'; render(); return; }
@@ -199,20 +235,23 @@ function submit(){
   }
   quiz.submitting = true;
   quiz.error = '';
+  quiz.duration = elapsed();
   updateQuizMeta();
   var current = quiz;
   var body = {
-    name: session.name, phone: session.phone, part: current.part,
+    name: session.name, phone: session.phone, part: current.part, duration: current.duration,
     answers: current.questions.map(function(q){ return { ch:q.ch, type:q.type, picked:q.picked }; })
   };
   api('/api?a=submit', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
     .then(function(d){
       if (quiz !== current) return;
-      result = { part: current.part, score: d.score, total: d.total, pct: d.pct, items: d.results || [] };
+      var dur = typeof d.duration === 'number' ? d.duration : current.duration;
+      result = { part: current.part, score: d.score, total: d.total, pct: d.pct, duration: dur, items: d.results || [] };
+      stopTimer();
       quiz = null;
       view = 'result';
       history = (history || []);
-      history.unshift({ part: current.part, score: d.score, total: d.total, pct: d.pct, ts: Date.now() });
+      history.unshift({ part: current.part, score: d.score, total: d.total, pct: d.pct, duration: dur, ts: Date.now() });
       render();
     })
     .catch(function(e){
@@ -225,6 +264,7 @@ function submit(){
 
 /* ---------- hiển thị ---------- */
 function render(){
+  if (view !== 'quiz') stopTimer();
   renderHeader();
   if (!session) view = 'login';
   if (view === 'login') renderLogin();
@@ -310,8 +350,9 @@ function renderHome(){
 
 function dotsHTML(){
   return quiz.questions.map(function(q, i){
-    var cls = 'dot' + (q.picked !== null ? ' done' : '') + (i === quiz.i ? ' cur' : '');
-    return '<button class="' + cls + '" type="button" data-act="goto" data-i="' + i + '" aria-label="Câu ' + (i+1) + (q.picked !== null ? ', đã trả lời' : '') + '">' + (i+1) + '</button>';
+    var cls = 'dot' + (q.picked !== null ? ' done ' + (isRight(q) ? 'right' : 'wrong') : '') + (i === quiz.i ? ' cur' : '');
+    var st = q.picked === null ? '' : (isRight(q) ? ', trả lời đúng' : ', trả lời sai');
+    return '<button class="' + cls + '" type="button" data-act="goto" data-i="' + i + '" aria-label="Câu ' + (i+1) + st + '">' + (i+1) + '</button>';
   }).join('');
 }
 function renderQuiz(){
@@ -319,22 +360,26 @@ function renderQuiz(){
   var prompt = q.type === 'k2r'
     ? '<p class="qcap">Chữ ' + part.label + ' này đọc là gì?</p><div class="qglyph kana">' + q.ch + '</div>'
     : '<p class="qcap">Chọn chữ ' + part.label + ' đọc là:</p><div class="qromaji">' + esc(q.ro) + '</div>';
+  var answered = q.picked !== null, correct = answerOf(q);
   var opts = q.opts.map(function(o, j){
-    var sel = q.picked === o;
-    return '<button class="opt' + (q.type === 'r2k' ? ' kana' : '') + (sel ? ' sel' : '') + '" type="button" data-act="pick" data-i="' + j + '" aria-pressed="' + sel + '">' +
-      '<span class="key" aria-hidden="true">' + (j+1) + '</span>' + esc(o) + '</button>';
+    var state = '', mark = '';
+    if (answered && o === correct){ state = ' right'; mark = '<span class="mk" aria-hidden="true">✓</span>'; }
+    else if (answered && o === q.picked){ state = ' wrong'; mark = '<span class="mk" aria-hidden="true">✗</span>'; }
+    return '<button class="opt' + (q.type === 'r2k' ? ' kana' : '') + state + '" type="button" data-act="pick" data-i="' + j + '"' + (answered ? ' disabled' : '') + '>' +
+      '<span class="key" aria-hidden="true">' + (j+1) + '</span>' + esc(o) + mark + '</button>';
   }).join('');
   main.innerHTML =
     '<div class="stack">' +
       '<div class="qtop">' +
         '<div class="qmeta"><p class="eyebrow">Phần ' + part.no + ' · ' + part.label + '</p><h2>Câu <span class="num">' + (quiz.i+1) + '/' + n + '</span></h2></div>' +
-        '<button class="btn small" type="button" data-act="exit">Thoát bài thi</button>' +
+        '<div class="qright"><span class="timer" title="Thời gian làm bài"><span class="sub">Thời gian</span><b id="timer" class="num">' + fmtDur(elapsed()) + '</b></span>' +
+        '<button class="btn small" type="button" data-act="exit">Thoát bài thi</button></div>' +
       '</div>' +
       '<div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="' + n + '" aria-valuenow="' + (quiz.i+1) + '"><i style="width:' + ((quiz.i+1)/n*100) + '%"></i></div>' +
-      '<section class="qcard">' + prompt + '<div class="opts">' + opts + '</div></section>' +
+      '<section class="qcard">' + prompt + '<div class="opts">' + opts + '</div><div class="fbslot">' + feedbackHTML(q) + '</div></section>' +
       '<div class="qnav">' +
         '<button class="btn" type="button" data-act="prev"' + (quiz.i === 0 ? ' disabled' : '') + '>Câu trước</button>' +
-        '<button class="btn" type="button" data-act="next"' + (quiz.i === n-1 ? ' disabled' : '') + '>Câu sau</button>' +
+        '<button class="btn' + (answered && quiz.i < n-1 ? ' btn-primary' : '') + '" type="button" data-act="next"' + (quiz.i === n-1 ? ' disabled' : '') + '>Câu sau</button>' +
       '</div>' +
       '<div class="dots" id="dots">' + dotsHTML() + '</div>' +
       '<div class="submitrow">' +
@@ -344,10 +389,21 @@ function renderQuiz(){
     '</div>';
   updateQuizMeta();
 }
+function feedbackHTML(q){
+  if (q.picked === null) return '';
+  var kana = '<span class="kana">' + esc(q.ch) + '</span>';
+  if (isRight(q)){
+    return '<div class="fb ok" role="status"><strong>Chính xác!</strong> ' +
+      (q.type === 'k2r' ? kana + ' đọc là ' + esc(q.ro) : esc(q.ro) + ' viết là ' + kana) + '</div>';
+  }
+  return '<div class="fb bad" role="status"><strong>Chưa đúng.</strong> Đáp án đúng: ' +
+    (q.type === 'r2k' ? kana + ' (' + esc(q.ro) + ')' : esc(q.ro)) + '</div>';
+}
 function updateQuizMeta(){
   var n = quiz.questions.length, a = answeredCount(), left = n - a;
+  var right = quiz.questions.filter(isRight).length;
   var d = $('#dots'); if (d) d.innerHTML = dotsHTML();
-  var an = $('#answered'); if (an) an.textContent = 'Đã trả lời ' + a + '/' + n + ' câu';
+  var an = $('#answered'); if (an) an.textContent = 'Đã trả lời ' + a + '/' + n + ' câu · Đúng ' + right + ' · Sai ' + (a - right);
   var note = $('#note'), btn = $('#submit');
   if (note){
     var msg = '';
@@ -381,6 +437,7 @@ function renderResult(){
         '<p class="eyebrow">Kết quả · Phần ' + part.no + ' · ' + part.label + '</p>' +
         '<div class="score">' + r.score + '<small>/' + r.total + '</small></div>' +
         '<div><span class="pill ' + rt.c + '">' + rt.t + '</span> <span class="sub num">&nbsp;' + r.pct + '% số câu đúng</span></div>' +
+        (r.duration ? '<p class="sub num">Thời gian làm bài: <strong>' + fmtDur(r.duration) + '</strong></p>' : '') +
         '<p class="status good" role="status">Đã lưu điểm của bạn.</p>' +
       '</div>' +
       '<div class="actions">' +
@@ -406,7 +463,8 @@ function renderHist(){
   var rows = history.slice().sort(function(a,b){ return b.ts - a.ts; }).map(function(a){
     var rt = rate(a.pct);
     return '<tr><td class="sub nowrap num">' + fmtTime(a.ts) + '</td><td>' + (PARTS[a.part] ? PARTS[a.part].label : '') + '</td>' +
-      '<td><strong class="num">' + a.score + '/' + a.total + '</strong> <span class="pill ' + rt.c + '">' + rt.t + '</span></td></tr>';
+      '<td><strong class="num">' + a.score + '/' + a.total + '</strong> <span class="pill ' + rt.c + '">' + rt.t + '</span></td>' +
+      '<td class="sub num nowrap">' + (a.duration ? fmtDur(a.duration) : '–') + '</td></tr>';
   }).join('');
   main.innerHTML =
     '<div class="stack">' +
@@ -414,7 +472,7 @@ function renderHist(){
       (historyError ? '<p class="err" role="alert">' + esc(historyError) + ' <button class="btn small" type="button" data-act="reload">Tải lại</button></p>' : '') +
       '<div class="tiles">' + tile('Hiragana · điểm cao nhất', h) + tile('Katakana · điểm cao nhất', k) + '</div>' +
       (history.length
-        ? '<section class="sec"><h2>Các lần thi</h2><div class="tablewrap"><table><thead><tr><th>Thời gian</th><th>Phần</th><th>Điểm</th></tr></thead><tbody>' + rows + '</tbody></table></div></section>'
+        ? '<section class="sec"><h2>Các lần thi</h2><div class="tablewrap"><table><thead><tr><th>Ngày thi</th><th>Phần</th><th>Điểm</th><th>Làm trong</th></tr></thead><tbody>' + rows + '</tbody></table></div></section>'
         : '<div class="empty"><p>Bạn chưa có bài làm nào.</p><button class="btn btn-primary" type="button" data-act="home">Làm bài ngay</button></div>') +
     '</div>';
 }

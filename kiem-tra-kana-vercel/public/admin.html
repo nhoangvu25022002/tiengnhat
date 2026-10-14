@@ -61,6 +61,11 @@ function fmtTime(ts){
     return new Date(ts).toLocaleString('vi-VN', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
   } catch(e){ return ''; }
 }
+function fmtDur(s){
+  s = Math.max(0, Math.round(+s || 0));
+  var m = Math.floor(s / 60), r = s % 60;
+  return (m < 10 ? '0' : '') + m + ':' + (r < 10 ? '0' : '') + r;
+}
 function api(path, opts){
   opts = opts || {};
   opts.headers = Object.assign({'x-admin-password': password}, opts.headers || {});
@@ -207,9 +212,10 @@ function drawRecent(){
       '<td><div class="nm">' + esc(a.name) + '</div><div class="sub num">' + esc(a.phone) + '</div></td>' +
       '<td>' + (LABEL[a.part] || '') + '</td>' +
       '<td><strong class="num">' + a.score + '/' + a.total + '</strong> <span class="pill ' + rt.c + '">' + rt.t + '</span></td>' +
+      '<td class="sub num nowrap">' + (a.duration ? fmtDur(a.duration) : '–') + '</td>' +
       '<td><button class="btn small danger" type="button" data-act="del" data-id="' + esc(a.id) + '">Xóa</button></td></tr>';
   }).join('');
-  sec.innerHTML = '<h2>Bài làm gần đây</h2><div class="tablewrap"><table><thead><tr><th>Thời gian</th><th>Thành viên</th><th>Phần</th><th>Điểm</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+  sec.innerHTML = '<h2>Bài làm gần đây</h2><div class="tablewrap"><table><thead><tr><th>Ngày thi</th><th>Thành viên</th><th>Phần</th><th>Điểm</th><th>Làm trong</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
     (attempts.length > recentShown ? '<div class="pagebtn"><button class="btn" type="button" data-act="more">Hiện thêm (' + (attempts.length - recentShown) + ' bài)</button></div>' : '');
 }
 
@@ -255,10 +261,10 @@ function stamp(){
   return d.getFullYear() + z(d.getMonth()+1) + z(d.getDate());
 }
 function exportAll(){
-  var rows = [['Thời gian','Họ tên','Số điện thoại','Phần','Điểm','Tổng số câu','Tỉ lệ đúng (%)','Chữ làm sai'].map(cell)];
+  var rows = [['Ngày thi','Họ tên','Số điện thoại','Phần','Điểm','Tổng số câu','Tỉ lệ đúng (%)','Thời gian làm bài (phút:giây)','Chữ làm sai'].map(cell)];
   attempts.forEach(function(a){
     rows.push([cell(fmtTime(a.ts)), cell(a.name), phoneCell(a.phone), cell(LABEL[a.part] || a.part),
-      a.score, a.total, a.pct, cell(a.wrong || '')]);
+      a.score, a.total, a.pct, cell(a.duration ? fmtDur(a.duration) : ''), cell(a.wrong || '')]);
   });
   downloadCsv('kana-bai-lam-' + stamp() + '.csv', rows);
 }
