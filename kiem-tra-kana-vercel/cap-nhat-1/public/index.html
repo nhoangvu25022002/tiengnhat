@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Kiểm Tra Kana</title>
+<meta name="description" content="Thi trắc nghiệm bảng chữ cái Hiragana và Katakana, chấm điểm tự động.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&family=Klee+One:wght@400;600&display=swap">
+<link rel="stylesheet" href="/style.css">
+<style>
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font-ui);font-size:15px;line-height:1.55}
+.foot{max-width:880px;margin-inline:auto;padding-inline:16px;padding-block:0 32px;font-size:.8rem;color:var(--muted)}
+.foot a{color:var(--muted)}
+/* báo đúng xanh, sai đỏ */
+.opt.right{background:var(--ok-soft);border-color:var(--ok);color:var(--ok)}
+.opt.wrong{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
+.opt:disabled{cursor:default}
+.opt:disabled:not(.right):not(.wrong){opacity:.55}
+.opt .mk{position:absolute;right:10px;top:6px;font-family:var(--font-ui);font-size:.9rem;font-weight:700}
+.fbslot{width:100%;max-width:520px;min-height:46px;display:flex}
+.fb{width:100%;padding:10px 14px;border-radius:10px;text-align:center;font-size:.95rem}
+.fb.ok{background:var(--ok-soft);color:var(--ok)}
+.fb.bad{background:var(--bad-soft);color:var(--bad)}
+.dot.done.right{background:var(--ok-soft);border-color:var(--ok);color:var(--ok)}
+.dot.done.wrong{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
+/* đồng hồ làm bài */
+.qright{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.timer{display:inline-flex;align-items:baseline;gap:8px;padding:5px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);font-variant-numeric:tabular-nums}
+.timer b{font-size:1.05rem}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="bar">
+    <div class="brand"><span class="mark kana" aria-hidden="true">あ</span><span>Kiểm Tra Kana</span></div>
+    <nav id="nav" aria-label="Điều hướng" hidden>
+      <button class="tab" id="tab-home" data-act="home" type="button">Làm bài</button>
+      <button class="tab" id="tab-hist" data-act="hist" type="button">Điểm của tôi</button>
+    </nav>
+    <div class="tools">
+      <div class="who" id="who" hidden>
+        <span id="who-name"></span>
+        <button class="btn small" data-act="logout" type="button">Đăng xuất</button>
+      </div>
+    </div>
+  </div>
+</header>
+<main class="wrap" id="main"></main>
+<footer class="foot"><a href="/admin">Quản lý</a></footer>
+
+<script>
+(function(){
+'use strict';
+
+var $ = function(s){ return document.querySelector(s); };
+var main = $('#main');
+var esc = function(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+};
+var TOTAL = 20;
+
+/* Bảng chữ: 46 chữ cơ bản + 23 chữ có dấu (bỏ ぢ, づ vì trùng cách đọc với じ, ず). */
+var PAIRS = [
+  ['あ','a'],['い','i'],['う','u'],['え','e'],['お','o'],
+  ['か','ka'],['き','ki'],['く','ku'],['け','ke'],['こ','ko'],
+  ['さ','sa'],['し','shi'],['す','su'],['せ','se'],['そ','so'],
+  ['た','ta'],['ち','chi'],['つ','tsu'],['て','te'],['と','to'],
+  ['な','na'],['に','ni'],['ぬ','nu'],['ね','ne'],['の','no'],
+  ['は','ha'],['ひ','hi'],['ふ','fu'],['へ','he'],['ほ','ho'],
+  ['ま','ma'],['み','mi'],['む','mu'],['め','me'],['も','mo'],
+  ['や','ya'],['ゆ','yu'],['よ','yo'],
+  ['ら','ra'],['り','ri'],['る','ru'],['れ','re'],['ろ','ro'],
+  ['わ','wa'],['を','wo'],['ん','n'],
+  ['が','ga'],['ぎ','gi'],['ぐ','gu'],['げ','ge'],['ご','go'],
+  ['ざ','za'],['じ','ji'],['ず','zu'],['ぜ','ze'],['ぞ','zo'],
+  ['だ','da'],['で','de'],['ど','do'],
+  ['ば','ba'],['び','bi'],['ぶ','bu'],['べ','be'],['ぼ','bo'],
+  ['ぱ','pa'],['ぴ','pi'],['ぷ','pu'],['ぺ','pe'],['ぽ','po']
+];
+function toKata(s){
+  return s.replace(/[ぁ-ゖ]/g, function(c){ return String.fromCharCode(c.charCodeAt(0) + 0x60); });
+}
+var PARTS = {
+  hiragana: { key:'hiragana', no:1, label:'Hiragana', sample:'あ',
+    items: PAIRS.map(function(p){ return {ch:p[0], ro:p[1]}; }) },
+  katakana: { key:'katakana', no:2, label:'Katakana', sample:'ア',
+    items: PAIRS.map(function(p){ return {ch:toKata(p[0]), ro:p[1]}; }) }
+};
+
+/* ---------- trạng thái ---------- */
+var session = null, view = 'login', quiz = null, result = null;
+var history = null, historyError = '';
+
+var store = {
+  get: function(k){ try { return JSON.parse(localStorage.getItem(k)); } catch(e){ return null; } },
+  set: function(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} },
+  del: function(k){ try { localStorage.removeItem(k); } catch(e){} }
+};
+
+/* ---------- tiện ích ---------- */
+function shuffle(a){
+  for (var i = a.length - 1; i > 0; i--){
+    var j = Math.floor(Math.random() * (i + 1));
+    var t = a[i]; a[i] = a[j]; a[j] = t;
+  }
+  return a;
+}
+function normName(v){ return String(v || '').replace(/\s+/g,' ').trim(); }
+function normPhone(v){
+  var p = String(v || '').replace(/[\s.\-()]/g,'');
+  if (p.indexOf('+84') === 0) p = '0' + p.slice(3);
+  else if (p.indexOf('84') === 0 && p.length === 11) p = '0' + p.slice(2);
+  return p;
+}
+function validPhone(p){ return /^0\d{9}$/.test(p); }
+function rate(p){
+  if (p >= 90) return {t:'Xuất sắc', c:'ok'};
+  if (p >= 75) return {t:'Tốt', c:'ok'};
+  if (p >= 60) return {t:'Đạt', c:'warn'};
+  return {t:'Cần ôn thêm', c:'bad'};
+}
+function fmtTime(ts){
+  if (!ts) return '';
+  try {
+    return new Date(ts).toLocaleString('vi-VN', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
+  } catch(e){ return ''; }
+}
+/* ---------- đồng hồ làm bài ---------- */
+var timerId = null;
+function fmtDur(s){
+  s = Math.max(0, Math.round(+s || 0));
+  var m = Math.floor(s / 60), r = s % 60;
+  return (m < 10 ? '0' : '') + m + ':' + (r < 10 ? '0' : '') + r;
+}
+function elapsed(){ return quiz ? Math.floor((Date.now() - quiz.startedAt) / 1000) : 0; }
+function stopTimer(){ if (timerId){ clearInterval(timerId); timerId = null; } }
+function startTimer(){
+  stopTimer();
+  timerId = setInterval(function(){
+    var el = $('#timer');
+    if (el && quiz && !quiz.submitting) el.textContent = fmtDur(elapsed());
+  }, 1000);
+}
+function answerOf(q){ return q.type === 'k2r' ? q.ro : q.ch; }
+function isRight(q){ return q.picked !== null && q.picked === answerOf(q); }
+
+function api(path, opts){
+  return fetch(path, opts).then(function(r){
+    return r.json().catch(function(){ return {}; }).then(function(d){
+      if (!r.ok){ var e = new Error(d.message || 'Không kết nối được máy chủ.'); e.data = d; throw e; }
+      return d;
+    });
+  });
+}
+
+/* ---------- lịch sử điểm ---------- */
+function loadHistory(){
+  if (!session) return;
+  historyError = '';
+  api('/api?a=mine&phone=' + encodeURIComponent(session.phone)).then(function(d){
+    history = d.attempts || [];
+  }).catch(function(e){
+    historyError = e.message || 'Không tải được lịch sử.';
+    if (!history) history = [];
+  }).then(function(){
+    if (view === 'home') renderHome();
+    else if (view === 'hist') renderHist();
+  });
+}
+function bestFor(part){
+  var mine = (history || []).filter(function(a){ return a.part === part; });
+  var best = null;
+  mine.forEach(function(a){ if (!best || a.pct > best.pct) best = a; });
+  return { n: mine.length, best: best };
+}
+
+/* ---------- bài thi ---------- */
+function buildQuiz(partKey){
+  var items = PARTS[partKey].items;
+  var picked = shuffle(items.slice()).slice(0, TOTAL);
+  var questions = picked.map(function(it){
+    var type = Math.random() < 0.5 ? 'k2r' : 'r2k';
+    var others = shuffle(items.filter(function(x){ return x.ch !== it.ch && x.ro !== it.ro; })).slice(0,3);
+    var opts = shuffle([it].concat(others)).map(function(x){ return type === 'k2r' ? x.ro : x.ch; });
+    return { ch:it.ch, ro:it.ro, type:type, opts:opts, picked:null };
+  });
+  return { part:partKey, questions:questions, i:0, confirmEmpty:false, exitArmed:false, submitting:false, error:'' };
+}
+function startQuiz(partKey){
+  if (!PARTS[partKey]) return;
+  quiz = buildQuiz(partKey);
+  quiz.startedAt = Date.now();
+  result = null;
+  view = 'quiz';
+  render();
+  startTimer();
+}
+function answeredCount(){
+  return quiz.questions.filter(function(q){ return q.picked !== null; }).length;
+}
+function go(i){
+  if (!quiz || quiz.submitting || i < 0 || i >= quiz.questions.length) return;
+  quiz.i = i;
+  renderQuiz();
+}
+function pick(idx){
+  if (view !== 'quiz' || !quiz || quiz.submitting) return;
+  var q = quiz.questions[quiz.i];
+  if (idx < 0 || idx >= q.opts.length) return;
+  if (q.picked !== null) return;            // đã chọn thì không đổi được, để tránh dò đáp án
+  q.picked = q.opts[idx];
+  quiz.confirmEmpty = false;
+  quiz.error = '';
+  renderQuiz();
+  var nb = main.querySelector('[data-act=next]:not([disabled]), #submit');
+  if (nb) nb.focus();
+}
+function exitQuiz(btn){
+  if (quiz.exitArmed){ quiz = null; view = 'home'; render(); return; }
+  quiz.exitArmed = true;
+  btn.textContent = 'Bấm lần nữa để thoát';
+  setTimeout(function(){ if (quiz && btn.isConnected){ quiz.exitArmed = false; btn.textContent = 'Thoát bài thi'; } }, 4000);
+}
+function submit(){
+  if (quiz.submitting) return;
+  var left = quiz.questions.length - answeredCount();
+  if (left > 0 && !quiz.confirmEmpty){
+    quiz.confirmEmpty = true;
+    updateQuizMeta();
+    return;
+  }
+  quiz.submitting = true;
+  quiz.error = '';
+  quiz.duration = elapsed();
+  updateQuizMeta();
+  var current = quiz;
+  var body = {
+    name: session.name, phone: session.phone, part: current.part, duration: current.duration,
+    answers: current.questions.map(function(q){ return { ch:q.ch, type:q.type, picked:q.picked }; })
+  };
+  api('/api?a=submit', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })
+    .then(function(d){
+      if (quiz !== current) return;
+      var dur = typeof d.duration === 'number' ? d.duration : current.duration;
+      result = { part: current.part, score: d.score, total: d.total, pct: d.pct, duration: dur, items: d.results || [] };
+      stopTimer();
+      quiz = null;
+      view = 'result';
+      history = (history || []);
+      history.unshift({ part: current.part, score: d.score, total: d.total, pct: d.pct, duration: dur, ts: Date.now() });
+      render();
+    })
+    .catch(function(e){
+      if (quiz !== current) return;
+      current.submitting = false;
+      current.error = (e && e.message ? e.message : 'Không nộp được bài.') + ' Đáp án của bạn vẫn được giữ, hãy bấm nộp lại.';
+      updateQuizMeta();
+    });
+}
+
+/* ---------- hiển thị ---------- */
+function render(){
+  if (view !== 'quiz') stopTimer();
+  renderHeader();
+  if (!session) view = 'login';
+  if (view === 'login') renderLogin();
+  else if (view === 'home') renderHome();
+  else if (view === 'quiz') renderQuiz();
+  else if (view === 'result') renderResult();
+  else if (view === 'hist') renderHist();
+  try { window.scrollTo(0,0); } catch(e){}
+}
+function renderHeader(){
+  var on = !!session;
+  $('#nav').hidden = !on || view === 'quiz';
+  $('#who').hidden = !on;
+  if (on) $('#who-name').textContent = session.name;
+  $('#tab-home').classList.toggle('on', view === 'home' || view === 'result');
+  $('#tab-hist').classList.toggle('on', view === 'hist');
+}
+
+function renderLogin(){
+  main.innerHTML =
+    '<section class="login">' +
+      '<div class="login-art kana" aria-hidden="true"><span>あ</span><span>ア</span></div>' +
+      '<h1>Kiểm tra Hiragana và Katakana</h1>' +
+      '<p class="muted">Nhập họ tên và số điện thoại để vào làm bài. Điểm được lưu theo số điện thoại, hãy dùng cùng một số mỗi lần để xem tiến bộ.</p>' +
+      '<form id="login-form" class="card form" novalidate>' +
+        '<div class="field"><label for="f-name">Họ và tên</label>' +
+          '<input id="f-name" name="name" type="text" autocomplete="name" maxlength="60" placeholder="Nguyễn Văn A" required></div>' +
+        '<div class="field"><label for="f-phone">Số điện thoại</label>' +
+          '<input id="f-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" maxlength="16" placeholder="0901234567" required></div>' +
+        '<p class="err" id="login-err" role="alert" hidden></p>' +
+        '<button class="btn btn-primary block" type="submit">Vào làm bài</button>' +
+      '</form>' +
+      '<ul class="facts"><li>2 phần thi</li><li>' + TOTAL + ' câu mỗi phần</li><li>Chấm điểm ngay khi nộp bài</li></ul>' +
+    '</section>';
+}
+function onLogin(e){
+  e.preventDefault();
+  var name = normName($('#f-name').value);
+  var phone = normPhone($('#f-phone').value);
+  var err = $('#login-err');
+  var msg = '';
+  if (name.length < 2) msg = 'Vui lòng nhập họ và tên (ít nhất 2 ký tự).';
+  else if (!validPhone(phone)) msg = 'Số điện thoại gồm 10 chữ số và bắt đầu bằng 0, ví dụ 0901234567.';
+  if (msg){ err.textContent = msg; err.hidden = false; return; }
+  session = { name: name, phone: phone };
+  store.set('kana.session', session);
+  history = null;
+  view = 'home';
+  render();
+  loadHistory();
+}
+function logout(){
+  session = null; quiz = null; result = null; history = null;
+  store.del('kana.session');
+  view = 'login';
+  render();
+}
+
+function partCard(p){
+  var b = bestFor(p.key);
+  var line;
+  if (history === null) line = 'Đang tải điểm của bạn…';
+  else if (b.best) line = 'Điểm cao nhất của bạn: <strong>' + b.best.score + '/' + b.best.total + '</strong> · ' + b.n + ' lần thi';
+  else line = 'Bạn chưa làm phần này.';
+  return '<article class="part">' +
+    '<div class="part-glyph kana" aria-hidden="true">' + p.sample + '</div>' +
+    '<div class="part-body">' +
+      '<p class="eyebrow">Phần ' + p.no + '</p>' +
+      '<h2>' + p.label + '</h2>' +
+      '<p class="muted">' + TOTAL + ' câu trắc nghiệm, lấy ngẫu nhiên từ ' + p.items.length + ' chữ gồm chữ cơ bản và chữ có dấu.</p>' +
+      '<p class="best">' + line + '</p>' +
+      '<button class="btn btn-primary" type="button" data-act="start" data-part="' + p.key + '">Bắt đầu phần ' + p.no + '</button>' +
+    '</div></article>';
+}
+function renderHome(){
+  main.innerHTML =
+    '<div class="stack">' +
+      '<div class="head"><h1>Xin chào, ' + esc(session.name) + '</h1>' +
+      '<p class="muted">Chọn một phần để làm bài. Mỗi phần được chấm điểm riêng.</p></div>' +
+      '<div class="parts">' + partCard(PARTS.hiragana) + partCard(PARTS.katakana) + '</div>' +
+    '</div>';
+}
+
+function dotsHTML(){
+  return quiz.questions.map(function(q, i){
+    var cls = 'dot' + (q.picked !== null ? ' done ' + (isRight(q) ? 'right' : 'wrong') : '') + (i === quiz.i ? ' cur' : '');
+    var st = q.picked === null ? '' : (isRight(q) ? ', trả lời đúng' : ', trả lời sai');
+    return '<button class="' + cls + '" type="button" data-act="goto" data-i="' + i + '" aria-label="Câu ' + (i+1) + st + '">' + (i+1) + '</button>';
+  }).join('');
+}
+function renderQuiz(){
+  var q = quiz.questions[quiz.i], part = PARTS[quiz.part], n = quiz.questions.length;
+  var prompt = q.type === 'k2r'
+    ? '<p class="qcap">Chữ ' + part.label + ' này đọc là gì?</p><div class="qglyph kana">' + q.ch + '</div>'
+    : '<p class="qcap">Chọn chữ ' + part.label + ' đọc là:</p><div class="qromaji">' + esc(q.ro) + '</div>';
+  var answered = q.picked !== null, correct = answerOf(q);
+  var opts = q.opts.map(function(o, j){
+    var state = '', mark = '';
+    if (answered && o === correct){ state = ' right'; mark = '<span class="mk" aria-hidden="true">✓</span>'; }
+    else if (answered && o === q.picked){ state = ' wrong'; mark = '<span class="mk" aria-hidden="true">✗</span>'; }
+    return '<button class="opt' + (q.type === 'r2k' ? ' kana' : '') + state + '" type="button" data-act="pick" data-i="' + j + '"' + (answered ? ' disabled' : '') + '>' +
+      '<span class="key" aria-hidden="true">' + (j+1) + '</span>' + esc(o) + mark + '</button>';
+  }).join('');
+  main.innerHTML =
+    '<div class="stack">' +
+      '<div class="qtop">' +
+        '<div class="qmeta"><p class="eyebrow">Phần ' + part.no + ' · ' + part.label + '</p><h2>Câu <span class="num">' + (quiz.i+1) + '/' + n + '</span></h2></div>' +
+        '<div class="qright"><span class="timer" title="Thời gian làm bài"><span class="sub">Thời gian</span><b id="timer" class="num">' + fmtDur(elapsed()) + '</b></span>' +
+        '<button class="btn small" type="button" data-act="exit">Thoát bài thi</button></div>' +
+      '</div>' +
+      '<div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="' + n + '" aria-valuenow="' + (quiz.i+1) + '"><i style="width:' + ((quiz.i+1)/n*100) + '%"></i></div>' +
+      '<section class="qcard">' + prompt + '<div class="opts">' + opts + '</div><div class="fbslot">' + feedbackHTML(q) + '</div></section>' +
+      '<div class="qnav">' +
+        '<button class="btn" type="button" data-act="prev"' + (quiz.i === 0 ? ' disabled' : '') + '>Câu trước</button>' +
+        '<button class="btn' + (answered && quiz.i < n-1 ? ' btn-primary' : '') + '" type="button" data-act="next"' + (quiz.i === n-1 ? ' disabled' : '') + '>Câu sau</button>' +
+      '</div>' +
+      '<div class="dots" id="dots">' + dotsHTML() + '</div>' +
+      '<div class="submitrow">' +
+        '<div><p class="sub" id="answered"></p><p class="note" id="note" role="status" hidden></p></div>' +
+        '<button class="btn btn-primary" type="button" id="submit" data-act="submit">Nộp bài</button>' +
+      '</div>' +
+    '</div>';
+  updateQuizMeta();
+}
+function feedbackHTML(q){
+  if (q.picked === null) return '';
+  var kana = '<span class="kana">' + esc(q.ch) + '</span>';
+  if (isRight(q)){
+    return '<div class="fb ok" role="status"><strong>Chính xác!</strong> ' +
+      (q.type === 'k2r' ? kana + ' đọc là ' + esc(q.ro) : esc(q.ro) + ' viết là ' + kana) + '</div>';
+  }
+  return '<div class="fb bad" role="status"><strong>Chưa đúng.</strong> Đáp án đúng: ' +
+    (q.type === 'r2k' ? kana + ' (' + esc(q.ro) + ')' : esc(q.ro)) + '</div>';
+}
+function updateQuizMeta(){
+  var n = quiz.questions.length, a = answeredCount(), left = n - a;
+  var right = quiz.questions.filter(isRight).length;
+  var d = $('#dots'); if (d) d.innerHTML = dotsHTML();
+  var an = $('#answered'); if (an) an.textContent = 'Đã trả lời ' + a + '/' + n + ' câu · Đúng ' + right + ' · Sai ' + (a - right);
+  var note = $('#note'), btn = $('#submit');
+  if (note){
+    var msg = '';
+    if (quiz.error) msg = quiz.error;
+    else if (quiz.confirmEmpty && left > 0) msg = 'Còn ' + left + ' câu chưa trả lời. Bấm "Vẫn nộp bài" để chấm điểm, hoặc làm tiếp.';
+    note.hidden = !msg;
+    note.textContent = msg;
+  }
+  if (btn){
+    btn.disabled = quiz.submitting;
+    btn.textContent = quiz.submitting ? 'Đang chấm điểm…' : (quiz.error ? 'Nộp lại' : (quiz.confirmEmpty && left > 0 ? 'Vẫn nộp bài' : 'Nộp bài'));
+  }
+}
+
+function renderResult(){
+  var r = result, part = PARTS[r.part], rt = rate(r.pct);
+  var wrong = r.items.filter(function(q){ return !q.correct; });
+  var wrongHTML = wrong.length ? (
+    '<section class="stack"><h3>Các câu cần xem lại (' + wrong.length + ')</h3><div class="wrong">' +
+    wrong.map(function(q){
+      var kana = q.type === 'r2k';
+      var you = q.picked === null ? '<span class="you">Bạn chưa trả lời</span>'
+        : '<span class="you">Bạn chọn: <span class="' + (kana ? 'kana' : '') + '">' + esc(q.picked) + '</span></span>';
+      return '<div class="witem"><div class="wglyph kana">' + esc(q.ch) + '</div><div class="wtext">' +
+        '<span class="right">Đúng: <span class="' + (kana ? 'kana' : '') + '">' + esc(q.answer) + '</span>' + (kana ? ' (' + esc(q.ro) + ')' : '') + '</span>' + you + '</div></div>';
+    }).join('') + '</div></section>'
+  ) : '<p class="status good">Bạn trả lời đúng tất cả các câu.</p>';
+  main.innerHTML =
+    '<div class="stack">' +
+      '<div class="resulthead">' +
+        '<p class="eyebrow">Kết quả · Phần ' + part.no + ' · ' + part.label + '</p>' +
+        '<div class="score">' + r.score + '<small>/' + r.total + '</small></div>' +
+        '<div><span class="pill ' + rt.c + '">' + rt.t + '</span> <span class="sub num">&nbsp;' + r.pct + '% số câu đúng</span></div>' +
+        (r.duration ? '<p class="sub num">Thời gian làm bài: <strong>' + fmtDur(r.duration) + '</strong></p>' : '') +
+        '<p class="status good" role="status">Đã lưu điểm của bạn.</p>' +
+      '</div>' +
+      '<div class="actions">' +
+        '<button class="btn btn-primary" type="button" data-act="retry">Làm lại phần ' + part.no + '</button>' +
+        '<button class="btn" type="button" data-act="home">Chọn phần khác</button>' +
+        '<button class="btn" type="button" data-act="hist">Xem điểm của tôi</button>' +
+      '</div>' +
+      wrongHTML +
+    '</div>';
+}
+
+function renderHist(){
+  var el;
+  if (history === null){
+    main.innerHTML = '<div class="stack"><h1>Điểm của tôi</h1><p class="muted">Đang tải…</p></div>';
+    return;
+  }
+  var h = bestFor('hiragana'), k = bestFor('katakana');
+  function tile(label, b){
+    return '<div class="tile"><span class="sub">' + label + '</span><b>' + (b.best ? b.best.score + '/' + b.best.total : '–') + '</b>' +
+      '<span class="sub">' + (b.n ? b.n + ' lần thi' : 'Chưa thi') + '</span></div>';
+  }
+  var rows = history.slice().sort(function(a,b){ return b.ts - a.ts; }).map(function(a){
+    var rt = rate(a.pct);
+    return '<tr><td class="sub nowrap num">' + fmtTime(a.ts) + '</td><td>' + (PARTS[a.part] ? PARTS[a.part].label : '') + '</td>' +
+      '<td><strong class="num">' + a.score + '/' + a.total + '</strong> <span class="pill ' + rt.c + '">' + rt.t + '</span></td>' +
+      '<td class="sub num nowrap">' + (a.duration ? fmtDur(a.duration) : '–') + '</td></tr>';
+  }).join('');
+  main.innerHTML =
+    '<div class="stack">' +
+      '<div class="head"><h1>Điểm của tôi</h1><p class="muted">' + esc(session.name) + ' · ' + esc(session.phone.slice(0,3) + '****' + session.phone.slice(-3)) + '</p></div>' +
+      (historyError ? '<p class="err" role="alert">' + esc(historyError) + ' <button class="btn small" type="button" data-act="reload">Tải lại</button></p>' : '') +
+      '<div class="tiles">' + tile('Hiragana · điểm cao nhất', h) + tile('Katakana · điểm cao nhất', k) + '</div>' +
+      (history.length
+        ? '<section class="sec"><h2>Các lần thi</h2><div class="tablewrap"><table><thead><tr><th>Ngày thi</th><th>Phần</th><th>Điểm</th><th>Làm trong</th></tr></thead><tbody>' + rows + '</tbody></table></div></section>'
+        : '<div class="empty"><p>Bạn chưa có bài làm nào.</p><button class="btn btn-primary" type="button" data-act="home">Làm bài ngay</button></div>') +
+    '</div>';
+}
+
+/* ---------- sự kiện ---------- */
+document.addEventListener('click', function(e){
+  var t = e.target.closest('[data-act]');
+  if (!t) return;
+  switch (t.dataset.act){
+    case 'start': startQuiz(t.dataset.part); break;
+    case 'pick': pick(+t.dataset.i); break;
+    case 'next': if (quiz) go(quiz.i + 1); break;
+    case 'prev': if (quiz) go(quiz.i - 1); break;
+    case 'goto': go(+t.dataset.i); break;
+    case 'submit': if (quiz) submit(); break;
+    case 'exit': if (quiz && !quiz.submitting) exitQuiz(t); break;
+    case 'home': view = 'home'; render(); if (history === null || historyError) loadHistory(); break;
+    case 'hist': view = 'hist'; render(); loadHistory(); break;
+    case 'reload': loadHistory(); break;
+    case 'retry': if (result) startQuiz(result.part); break;
+    case 'logout': logout(); break;
+  }
+});
+document.addEventListener('submit', function(e){
+  if (e.target && e.target.id === 'login-form') onLogin(e);
+});
+document.addEventListener('keydown', function(e){
+  if (view !== 'quiz' || !quiz) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target && e.target.closest && e.target.closest('input,textarea')) return;
+  if (e.key >= '1' && e.key <= '4') pick(+e.key - 1);
+  else if (e.key === 'ArrowRight') go(quiz.i + 1);
+  else if (e.key === 'ArrowLeft') go(quiz.i - 1);
+});
+
+/* ---------- khởi động ---------- */
+var saved = store.get('kana.session');
+if (saved && typeof saved.name === 'string' && typeof saved.phone === 'string' && validPhone(saved.phone) && normName(saved.name).length >= 2){
+  session = { name: normName(saved.name), phone: saved.phone };
+  view = 'home';
+}
+render();
+if (session) loadHistory();
+})();
+</script>
+</body>
+</html>
