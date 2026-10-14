@@ -242,14 +242,15 @@ async function submit(request) {
 
   const total = answers.length;
   const pct = Math.round((score / total) * 100);
+  const duration = Math.max(0, Math.min(86400, Math.round(Number(b.duration) || 0))); // giây
   const ts = Date.now();
   const id = ts + '-' + Math.random().toString(36).slice(2, 8);
 
   const size = Number(await redis(['HLEN', KEY])) || 0;
   if (size >= MAX_RECORDS) return send({ error: 'full', message: 'Kho dữ liệu đã đầy, hãy báo quản trị viên.' }, 507);
 
-  await redis(['HSET', KEY, id, JSON.stringify({ id, name, phone, part, score, total, pct, ts, wrong })]);
-  return send({ ok: true, id, score, total, pct, results });
+  await redis(['HSET', KEY, id, JSON.stringify({ id, name, phone, part, score, total, pct, duration, ts, wrong })]);
+  return send({ ok: true, id, score, total, pct, duration, results });
 }
 
 /* ---------- lịch sử của một số điện thoại ---------- */
@@ -259,7 +260,7 @@ async function mine(url) {
   const rows = (await allRecords())
     .filter((r) => r.phone === phone)
     .slice(0, 100)
-    .map((r) => ({ part: r.part, score: r.score, total: r.total, pct: r.pct, ts: r.ts }));
+    .map((r) => ({ part: r.part, score: r.score, total: r.total, pct: r.pct, duration: r.duration || 0, ts: r.ts }));
   return send({ attempts: rows });
 }
 
