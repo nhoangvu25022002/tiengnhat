@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>Quản Lý Kiểm Tra Kana</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&family=Klee+One:wght@400;600&display=swap">
+<link rel="stylesheet" href="/style.css">
+<style>
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font-ui);font-size:15px;line-height:1.55}
+[hidden]{display:none!important}
+a.btn{color:var(--fg)}
+input[type=password]{width:100%;padding:.7em .85em;border:1px solid var(--line);border-radius:8px;background:var(--surface);font-size:16px}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px}
+.adminlogin{max-width:420px;margin:12px auto 0;display:flex;flex-direction:column;gap:16px}
+.pagebtn{display:flex;justify-content:center}
+.banner{display:flex;flex-direction:column;gap:10px;padding:14px 16px;border:1px solid var(--accent);border-radius:10px;background:var(--accent-soft)}
+.banner code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:1.25rem;font-weight:700;letter-spacing:.08em;user-select:all}
+.banner .row{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.rowact{display:flex;flex-wrap:wrap;gap:6px}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="bar">
+    <div class="brand"><span class="mark kana" aria-hidden="true">あ</span><span>Kiểm Tra Kana</span></div>
+    <nav aria-label="Điều hướng"><a class="tab on" href="/admin" style="text-decoration:none">Quản lý</a></nav>
+    <div class="tools">
+      <a class="btn small" href="/" style="text-decoration:none">Trang thi</a>
+      <button class="btn small" id="logout" type="button" hidden>Đăng xuất</button>
+    </div>
+  </div>
+</header>
+<main class="wrap" id="main"></main>
+
+<script>
+(function(){
+'use strict';
+
+var $ = function(s){ return document.querySelector(s); };
+var main = $('#main');
+var esc = function(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+};
+var LABEL = { hiragana:'Hiragana', katakana:'Katakana' };
+
+var password = '';
+try { password = sessionStorage.getItem('kana.adminpw') || ''; } catch(e){}
+var attempts = [], users = [], tab = 'results', search = '', recentShown = 50, loading = false;
+var tempPw = null, flash = '';
+
+function fold(s){
+  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/đ/g,'d').replace(/Đ/g,'D').toLowerCase();
+}
+function rate(p){
+  if (p >= 90) return {t:'Xuất sắc', c:'ok'};
+  if (p >= 75) return {t:'Tốt', c:'ok'};
+  if (p >= 60) return {t:'Đạt', c:'warn'};
+  return {t:'Cần ôn thêm', c:'bad'};
+}
+function fmtTime(ts){
+  if (!ts) return '';
+  try {
+    return new Date(ts).toLocaleString('vi-VN', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
+  } catch(e){ return ''; }
+}
+function fmtDur(s){
+  s = Math.max(0, Math.round(+s || 0));
+  var m = Math.floor(s / 60), r = s % 60;
+  return (m < 10 ? '0' : '') + m + ':' + (r < 10 ? '0' : '') + r;
+}
+function api(path, opts){
+  opts = opts || {};
+  opts.headers = Object.assign({'x-admin-password': password}, opts.headers || {});
+  return fetch(path, opts).then(function(r){
+    return r.json().catch(function(){ return {}; }).then(function(d){
+      if (!r.ok){ var e = new Error(d.message || 'Không kết nối được máy chủ.'); e.status = r.status; throw e; }
+      return d;
+    });
+  }, function(){
+    var e = new Error('Không kết nối được máy chủ. Hãy kiểm tra mạng rồi thử lại.'); throw e;
+  });
+}
+
+/* ---------- đăng nhập quản trị ---------- */
+function renderLogin(msg){
+  $('#logout').hidden = true;
+  main.innerHTML =
+    '<section class="adminlogin">' +
+      '<h1>Trang quản lý</h1>' +
+      '<p class="muted">Nhập mật khẩu quản trị để xem toàn bộ bài làm, quản lý tài khoản và xuất ra Excel.</p>' +
+      '<form id="login-form" class="card form" novalidate>' +
+        '<div class="field"><label for="f-pw">Mật khẩu</label>' +
+          '<input id="f-pw" type="password" autocomplete="current-password" required></div>' +
+        '<p class="err" id="login-err" role="alert"' + (msg ? '' : ' hidden') + '>' + esc(msg || '') + '</p>' +
+        '<button class="btn btn-primary block" type="submit">Vào trang quản lý</button>' +
+      '</form>' +
+    '</section>';
+  var f = $('#f-pw'); if (f) f.focus();
+}
+function onLogin(e){
+  e.preventDefault();
+  var v = $('#f-pw').value;
+  if (!v){ renderLogin('Vui lòng nhập mật khẩu.'); return; }
+  password = v;
+  load(true);
+}
+function logout(){
+  password = ''; attempts = []; users = []; tempPw = null; flash = '';
+  try { sessionStorage.removeItem('kana.adminpw'); } catch(e){}
+  renderLogin();
+}
+
+/* ---------- tải dữ liệu ---------- */
+function load(fromLogin){
+  if (loading) return;
+  loading = true;
+  if (fromLogin) main.innerHTML = '<p class="muted">Đang tải dữ liệu…</p>';
+  api('/api?a=admin').then(function(d){
+    attempts = d.attempts || [];
+    users = d.users || [];
+    try { sessionStorage.setItem('kana.adminpw', password); } catch(e){}
+    loading = false;
+    renderDash();
+  }).catch(function(err){
+    loading = false;
+    if (err.status === 401 || err.status === 429 || err.status === 503){
+      password = '';
+      try { sessionStorage.removeItem('kana.adminpw'); } catch(e){}
+      renderLogin(err.message);
+    } else if (attempts.length || users.length){
+      renderDash(err.message);
+    } else {
+      renderLogin(err.message);
+    }
+  });
+}
+
+/* ---------- tổng hợp ---------- */
+function memberKey(a){ return a.username || ('tel:' + a.phone); }
+function aggregate(list){
+  var map = {}, out = [];
+  list.forEach(function(a){
+    var k = memberKey(a);
+    var m = map[k];
+    if (!m){
+      m = map[k] = { username:a.username || '', phone:a.phone, name:a.name, last:0, hiragana:{n:0,best:null}, katakana:{n:0,best:null} };
+      out.push(m);
+    }
+    if (a.ts > m.last){ m.last = a.ts; m.name = a.name; m.phone = a.phone; }
+    var p = m[a.part];
+    if (!p) return;
+    p.n++;
+    if (!p.best || a.pct > p.best.pct || (a.pct === p.best.pct && a.ts > p.best.ts)) p.best = a;
+  });
+  return out.sort(function(x,y){ return y.last - x.last; });
+}
+function avg(part){
+  var x = attempts.filter(function(a){ return a.part === part; });
+  if (!x.length) return '–';
+  return Math.round(x.reduce(function(s,a){ return s + a.pct; }, 0) / x.length) + '%';
+}
+function partCell(p){
+  if (!p.best) return '<span class="sub">Chưa thi</span>';
+  return '<div class="cellscore"><strong>' + p.best.score + '/' + p.best.total + '</strong>' +
+    '<div class="meter"><i style="width:' + Math.max(0, Math.min(100, p.best.pct)) + '%"></i></div>' +
+    '<span class="sub">' + p.best.pct + '% · ' + p.n + ' lần thi</span></div>';
+}
+function matches(q, fields){
+  if (!q) return true;
+  return fields.some(function(f){ return fold(f).indexOf(q) >= 0; });
+}
+
+/* ---------- giao diện chính ---------- */
+function renderDash(errMsg){
+  $('#logout').hidden = false;
+  var memberCount = aggregate(attempts).length;
+  function tile(label, val){ return '<div class="tile"><span class="sub">' + label + '</span><b>' + val + '</b></div>'; }
+  var tools = tab === 'users'
+    ? '<button class="btn small" type="button" data-act="csv-users">Xuất danh sách tài khoản (Excel)</button>'
+    : '<button class="btn small" type="button" data-act="csv-members">Xuất tổng hợp (Excel)</button>' +
+      '<button class="btn btn-primary small" type="button" data-act="csv-all">Xuất tất cả bài làm (Excel)</button>';
+  main.innerHTML =
+    '<div class="stack">' +
+      '<div class="stats-head"><div class="head"><h1>Quản lý</h1><p class="muted">Tài khoản và điểm của toàn bộ thành viên.</p></div>' +
+        '<div class="toolbar"><button class="btn small" type="button" data-act="refresh">Tải lại</button>' + tools + '</div></div>' +
+      (errMsg ? '<p class="err" role="alert">' + esc(errMsg) + '</p>' : '') +
+      (flash ? '<p class="status good" role="status">' + esc(flash) + '</p>' : '') +
+      '<div class="tiles">' +
+        tile('Tài khoản', users.length) + tile('Lượt thi', attempts.length) +
+        tile('Trung bình Hiragana', avg('hiragana')) + tile('Trung bình Katakana', avg('katakana')) +
+      '</div>' +
+      '<div class="sechead"><div class="seg" role="group" aria-label="Chọn mục">' +
+          '<button class="segbtn' + (tab === 'results' ? ' on' : '') + '" type="button" data-act="tab" data-tab="results">Bài làm</button>' +
+          '<button class="segbtn' + (tab === 'users' ? ' on' : '') + '" type="button" data-act="tab" data-tab="users">Tài khoản (' + users.length + ')</button>' +
+        '</div>' +
+        '<input class="search" id="q" type="search" placeholder="Tìm tên, tài khoản, SĐT" aria-label="Tìm kiếm" value="' + esc(search) + '"></div>' +
+      '<div id="tempbox"></div>' +
+      '<div id="tabbody" class="stack"></div>' +
+    '</div>';
+  drawTemp();
+  drawBody();
+}
+function drawTemp(){
+  var el = $('#tempbox'); if (!el) return;
+  if (!tempPw){ el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="banner" role="status"><div>Mật khẩu tạm của <strong>@' + esc(tempPw.username) + '</strong>:</div>' +
+    '<div class="row"><code>' + esc(tempPw.pw) + '</code>' +
+    '<button class="btn small" type="button" data-act="copytemp">Sao chép</button>' +
+    '<button class="btn small" type="button" data-act="hidetemp">Ẩn</button></div>' +
+    '<p class="sub">Gửi mật khẩu này cho người đó và nhắc họ vào mục Tài khoản để đổi lại. Mật khẩu chỉ hiện một lần, tải lại trang là mất.</p></div>';
+}
+function drawBody(){
+  var el = $('#tabbody'); if (!el) return;
+  el.innerHTML = tab === 'users' ? usersHTML() : membersHTML() + recentHTML();
+}
+
+/* ----- tab Bài làm ----- */
+function membersHTML(){
+  var q = fold(search.trim());
+  var head = '<section class="sec"><h2>Thành viên</h2>';
+  if (!attempts.length){
+    return head + '<div class="empty"><p>Chưa có bài làm nào. Điểm sẽ xuất hiện ở đây sau khi có người nộp bài.</p></div></section>';
+  }
+  var rows = aggregate(attempts).filter(function(m){ return matches(q, [m.name, m.username, m.phone]); });
+  if (!rows.length) return head + '<div class="empty"><p>Không tìm thấy thành viên phù hợp.</p></div></section>';
+  return head + '<div class="tablewrap"><table><thead><tr><th>Thành viên</th><th>Hiragana</th><th>Katakana</th><th>Lần cuối</th></tr></thead><tbody>' +
+    rows.map(function(m){
+      return '<tr><td><div class="nm">' + esc(m.name) + '</div>' +
+        '<div class="sub">' + (m.username ? '@' + esc(m.username) : 'chưa có tài khoản') + ' · <span class="num">' + esc(m.phone) + '</span></div></td>' +
+        '<td>' + partCell(m.hiragana) + '</td><td>' + partCell(m.katakana) + '</td>' +
+        '<td class="sub nowrap num">' + fmtTime(m.last) + '</td></tr>';
+    }).join('') + '</tbody></table></div></section>';
+}
+function recentHTML(){
+  if (!attempts.length) return '';
+  var q = fold(search.trim());
+  var list = attempts.filter(function(a){ return matches(q, [a.name, a.username, a.phone]); });
+  if (!list.length) return '';
+  var shown = list.slice(0, recentShown);
+  var rows = shown.map(function(a){
+    var rt = rate(a.pct);
+    return '<tr><td class="sub nowrap num">' + fmtTime(a.ts) + '</td>' +
+      '<td><div class="nm">' + esc(a.name) + '</div><div class="sub">' + (a.username ? '@' + esc(a.username) + ' · ' : '') + '<span class="num">' + esc(a.phone) + '</span></div></td>' +
+      '<td>' + (LABEL[a.part] || '') + '</td>' +
+      '<td><strong class="num">' + a.score + '/' + a.total + '</strong> <span class="pill ' + rt.c + '">' + rt.t + '</span></td>' +
+      '<td class="sub num nowrap">' + (a.duration ? fmtDur(a.duration) : '–') + '</td>' +
+      '<td><button class="btn small danger" type="button" data-act="del" data-id="' + esc(a.id) + '">Xóa</button></td></tr>';
+  }).join('');
+  return '<section class="sec"><h2>Bài làm gần đây</h2><div class="tablewrap"><table><thead><tr><th>Ngày thi</th><th>Thành viên</th><th>Phần</th><th>Điểm</th><th>Làm trong</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    (list.length > recentShown ? '<div class="pagebtn"><button class="btn" type="button" data-act="more">Hiện thêm (' + (list.length - recentShown) + ' bài)</button></div>' : '') + '</section>';
+}
+
+/* ----- tab Tài khoản ----- */
+function usersHTML(){
+  var q = fold(search.trim());
+  var head = '<section class="sec"><h2>Tài khoản đã đăng ký</h2>';
+  if (!users.length){
+    return head + '<div class="empty"><p>Chưa có tài khoản nào. Tài khoản xuất hiện ở đây sau khi người dùng đăng ký.</p></div></section>';
+  }
+  var counts = {};
+  attempts.forEach(function(a){ if (a.username) counts[a.username] = (counts[a.username] || 0) + 1; });
+  var rows = users.filter(function(u){ return matches(q, [u.name, u.username, u.phone]); });
+  if (!rows.length) return head + '<div class="empty"><p>Không tìm thấy tài khoản phù hợp.</p></div></section>';
+  return head + '<div class="tablewrap"><table><thead><tr><th>Tài khoản</th><th>Số điện thoại</th><th>Ngày tạo</th><th>Lượt thi</th><th></th></tr></thead><tbody>' +
+    rows.map(function(u){
+      var n = counts[u.username] || 0;
+      return '<tr><td><div class="nm">' + esc(u.name) + '</div><div class="sub">@' + esc(u.username) + '</div></td>' +
+        '<td class="num">' + esc(u.phone) + '</td>' +
+        '<td class="sub nowrap num">' + fmtTime(u.created) + '</td>' +
+        '<td class="num">' + n + '</td>' +
+        '<td><div class="rowact">' +
+          '<button class="btn small" type="button" data-act="resetpw" data-user="' + esc(u.username) + '">Đặt lại mật khẩu</button>' +
+          '<button class="btn small danger" type="button" data-act="deluser" data-user="' + esc(u.username) + '" data-n="' + n + '">Xóa</button>' +
+        '</div></td></tr>';
+    }).join('') + '</tbody></table></div></section>';
+}
+
+/* ---------- thao tác cần bấm hai lần để xác nhận ---------- */
+function arm(btn, askText, backText){
+  if (btn.dataset.armed) return true;
+  btn.dataset.armed = '1';
+  btn.textContent = askText;
+  setTimeout(function(){ if (btn.isConnected){ delete btn.dataset.armed; btn.textContent = backText; } }, 4000);
+  return false;
+}
+function failed(btn, backText, err){
+  btn.disabled = false; btn.textContent = backText; delete btn.dataset.armed;
+  renderDash(err.message);
+}
+function delResult(btn){
+  if (!arm(btn, 'Xác nhận xóa', 'Xóa')) return;
+  var id = btn.dataset.id;
+  btn.disabled = true;
+  api('/api?a=delete&id=' + encodeURIComponent(id), { method:'POST' }).then(function(){
+    attempts = attempts.filter(function(a){ return a.id !== id; });
+    flash = '';
+    renderDash();
+  }).catch(function(err){ failed(btn, 'Xóa', err); });
+}
+function resetPw(btn){
+  var u = btn.dataset.user;
+  if (!arm(btn, 'Xác nhận đặt lại', 'Đặt lại mật khẩu')) return;
+  btn.disabled = true;
+  api('/api?a=resetpw&username=' + encodeURIComponent(u), { method:'POST' }).then(function(d){
+    tempPw = { username: d.username, pw: d.tempPassword };
+    flash = '';
+    renderDash();
+    var box = $('#tempbox'); if (box && box.scrollIntoView) box.scrollIntoView({ block:'nearest' });
+  }).catch(function(err){ failed(btn, 'Đặt lại mật khẩu', err); });
+}
+function delUser(btn){
+  var u = btn.dataset.user, n = +btn.dataset.n || 0;
+  if (!arm(btn, n ? 'Xóa tài khoản và ' + n + ' bài làm?' : 'Xác nhận xóa', 'Xóa')) return;
+  btn.disabled = true;
+  api('/api?a=deluser&username=' + encodeURIComponent(u), { method:'POST' }).then(function(d){
+    users = users.filter(function(x){ return x.username !== u; });
+    attempts = attempts.filter(function(a){ return a.username !== u; });
+    if (tempPw && tempPw.username === u) tempPw = null;
+    flash = 'Đã xóa tài khoản @' + u + (d.removedResults ? ' và ' + d.removedResults + ' bài làm.' : '.');
+    renderDash();
+  }).catch(function(err){ failed(btn, 'Xóa', err); });
+}
+function copyTemp(btn){
+  if (!tempPw) return;
+  function done(ok){ btn.textContent = ok ? 'Đã sao chép' : 'Hãy chọn và sao chép thủ công'; }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(tempPw.pw).then(function(){ done(true); }, function(){ done(false); });
+      return;
+    }
+  } catch(e){}
+  done(false);
+}
+
+/* ---------- xuất CSV (mở được bằng Excel) ---------- */
+function cell(v){
+  var s = String(v == null ? '' : v);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;           // chặn công thức độc hại trong Excel
+  return '"' + s.replace(/"/g, '""') + '"';
+}
+function phoneCell(p){ return /^0\d{9}$/.test(p) ? '="' + p + '"' : cell(p); }  // giữ số 0 đầu trong Excel
+function downloadCsv(name, rows){
+  var csv = '﻿' + rows.map(function(r){ return r.join(','); }).join('\r\n');
+  var blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+}
+function stamp(){
+  var d = new Date(), z = function(n){ return String(n).padStart(2,'0'); };
+  return d.getFullYear() + z(d.getMonth()+1) + z(d.getDate());
+}
+function exportAll(){
+  var rows = [['Ngày thi','Tên đăng nhập','Họ tên','Số điện thoại','Phần','Điểm','Tổng số câu','Tỉ lệ đúng (%)','Thời gian làm bài (phút:giây)','Chữ làm sai'].map(cell)];
+  attempts.forEach(function(a){
+    rows.push([cell(fmtTime(a.ts)), cell(a.username || ''), cell(a.name), phoneCell(a.phone), cell(LABEL[a.part] || a.part),
+      a.score, a.total, a.pct, cell(a.duration ? fmtDur(a.duration) : ''), cell(a.wrong || '')]);
+  });
+  downloadCsv('kana-bai-lam-' + stamp() + '.csv', rows);
+}
+function exportMembers(){
+  var rows = [['Tên đăng nhập','Họ tên','Số điện thoại','Hiragana cao nhất','Hiragana số lần','Katakana cao nhất','Katakana số lần','Lần cuối'].map(cell)];
+  aggregate(attempts).forEach(function(m){
+    rows.push([cell(m.username), cell(m.name), phoneCell(m.phone),
+      m.hiragana.best ? cell(m.hiragana.best.score + '/' + m.hiragana.best.total) : cell(''), m.hiragana.n,
+      m.katakana.best ? cell(m.katakana.best.score + '/' + m.katakana.best.total) : cell(''), m.katakana.n,
+      cell(fmtTime(m.last))]);
+  });
+  downloadCsv('kana-tong-hop-' + stamp() + '.csv', rows);
+}
+function exportUsers(){
+  var counts = {};
+  attempts.forEach(function(a){ if (a.username) counts[a.username] = (counts[a.username] || 0) + 1; });
+  var rows = [['Tên đăng nhập','Họ tên','Số điện thoại','Ngày tạo tài khoản','Số lượt thi'].map(cell)];
+  users.forEach(function(u){
+    rows.push([cell(u.username), cell(u.name), phoneCell(u.phone), cell(fmtTime(u.created)), counts[u.username] || 0]);
+  });
+  downloadCsv('kana-tai-khoan-' + stamp() + '.csv', rows);
+}
+
+/* ---------- sự kiện ---------- */
+document.addEventListener('click', function(e){
+  var t = e.target.closest('[data-act]');
+  if (!t) return;
+  switch (t.dataset.act){
+    case 'refresh': flash = ''; load(false); break;
+    case 'csv-all': exportAll(); break;
+    case 'csv-members': exportMembers(); break;
+    case 'csv-users': exportUsers(); break;
+    case 'tab': tab = t.dataset.tab === 'users' ? 'users' : 'results'; renderDash(); break;
+    case 'del': delResult(t); break;
+    case 'resetpw': resetPw(t); break;
+    case 'deluser': delUser(t); break;
+    case 'copytemp': copyTemp(t); break;
+    case 'hidetemp': tempPw = null; drawTemp(); break;
+    case 'more': recentShown += 50; drawBody(); break;
+  }
+});
+$('#logout').addEventListener('click', logout);
+document.addEventListener('submit', function(e){
+  if (e.target && e.target.id === 'login-form') onLogin(e);
+});
+document.addEventListener('input', function(e){
+  if (e.target && e.target.id === 'q'){ search = e.target.value; drawBody(); }
+});
+
+if (password) load(true); else renderLogin();
+})();
+</script>
+</body>
+</html>
